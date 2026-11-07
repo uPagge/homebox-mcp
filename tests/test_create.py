@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from test_move import _inventory
 
 
@@ -69,8 +71,9 @@ def test_create_into_ambiguous_item_refused(router, good_status):
     })
     post, _ = _create_routes(router)
     import homebox_mcp as hb
-    result = hb.create_item("Lens", location="Camera Bag")
-    assert "ambiguous — 2 items match" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.create_item("Lens", location="Camera Bag")
+    assert "ambiguous — 2 items match" in str(exc.value)
     assert not post.called
 
 
@@ -78,8 +81,9 @@ def test_create_unknown_location_refused(router, good_status):
     _inventory(router, {})
     post, _ = _create_routes(router)
     import homebox_mcp as hb
-    result = hb.create_item("Lens", location="Nowhere")
-    assert "no location or item named 'Nowhere'" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.create_item("Lens", location="Nowhere")
+    assert "no location or item named 'Nowhere'" in str(exc.value)
     assert not post.called
 
 

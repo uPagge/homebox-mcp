@@ -11,6 +11,7 @@ import json
 
 import httpx
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 import homebox_mcp as hb
 
@@ -49,8 +50,9 @@ def test_log_maintenance_unresolved_item_returns_error(router, good_status):
     router.get("/entities").mock(
         return_value=httpx.Response(200, json={"items": [], "total": 0})
     )
-    result = hb.log_maintenance("Ghost", name="Oil change")
-    assert "no item exactly matched" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.log_maintenance("Ghost", name="Oil change")
+    assert "no item exactly matched" in str(exc.value)
 
 
 # --- list_maintenance ------------------------------------------------------
@@ -109,8 +111,9 @@ def test_set_maintenance_merges_and_normalizes(router, good_status):
 def test_set_maintenance_unknown_entry_returns_error(router, good_status):
     router.get("/maintenance").mock(return_value=httpx.Response(200, json=[]))
     put = router.put("/maintenance/nope").mock(return_value=httpx.Response(200, json={}))
-    result = hb.set_maintenance("nope", name="x")
-    assert "no maintenance entry" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.set_maintenance("nope", name="x")
+    assert "no maintenance entry" in str(exc.value)
     assert not put.called
 
 
@@ -120,8 +123,9 @@ def test_delete_maintenance_wrong_confirm_blocks_delete(router, good_status):
         return_value=httpx.Response(200, json=[{"id": "m1", "name": "Oil change"}])
     )
     delete = router.delete("/maintenance/m1").mock(return_value=httpx.Response(204))
-    result = hb.delete_maintenance("m1", confirm="wrong")
-    assert "confirm must equal" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.delete_maintenance("m1", confirm="wrong")
+    assert "confirm must equal" in str(exc.value)
     assert not delete.called
 
 

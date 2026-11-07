@@ -30,7 +30,7 @@ jobs:
         id: mcp
         run: |
           if [ "${{ matrix.mcp-version }}" = "lowest" ]; then
-            echo "spec=mcp==2.0.0" >> "$GITHUB_OUTPUT"
+            echo "spec=mcp==2.3.0" >> "$GITHUB_OUTPUT"
           else
             echo "spec=mcp<3" >> "$GITHUB_OUTPUT"
           fi

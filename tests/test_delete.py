@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import httpx
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 
 def _mock_item(router, name="Widget", eid="e1", asset="000-9"):
@@ -22,8 +24,9 @@ def test_delete_item_wrong_confirm_blocks_delete(router, good_status):
     _mock_item(router)
     delete = router.delete("/entities/e1").mock(return_value=httpx.Response(204))
     import homebox_mcp as hb
-    result = hb.delete_item("Widget", confirm="nope")
-    assert "confirm must equal" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.delete_item("Widget", confirm="nope")
+    assert "confirm must equal" in str(exc.value)
     assert not delete.called
 
 
@@ -42,8 +45,9 @@ def test_delete_tag_wrong_confirm_blocks_delete(router, good_status):
     )
     delete = router.delete("/tags/t1").mock(return_value=httpx.Response(204))
     import homebox_mcp as hb
-    result = hb.delete_tag("junk", confirm="wrong")
-    assert "confirm must equal" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.delete_tag("junk", confirm="wrong")
+    assert "confirm must equal" in str(exc.value)
     assert not delete.called
 
 
@@ -70,7 +74,8 @@ def test_delete_location_nonempty_refused(router, good_status):
     )
     delete = router.delete("/entities/g1").mock(return_value=httpx.Response(204))
     import homebox_mcp as hb
-    result = hb.delete_location("Garage", confirm="Garage")
-    assert "not deleted" in result["error"]
-    assert "sub-location" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.delete_location("Garage", confirm="Garage")
+    assert "not deleted" in str(exc.value)
+    assert "sub-location" in str(exc.value)
     assert not delete.called

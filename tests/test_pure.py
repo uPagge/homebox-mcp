@@ -1,6 +1,9 @@
 """Pure-function tests (no HTTP): the type-mapping and formatting helpers."""
 from __future__ import annotations
 
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
+
 import homebox_mcp as hb
 
 
@@ -86,9 +89,15 @@ def test_field_type_numbers_and_text():
     assert hb._field_type(None) == "text"
 
 
-def test_make_field_number_coerces_float_to_int():
-    # Homebox's number field is integer-typed; a float 500s the API.
-    assert hb._make_field("watts", 17000.5, "number") == {
+def test_make_field_number_rejects_fractional_float():
+    # Integer custom fields must not silently truncate fractional values.
+    with pytest.raises(ToolError, match="whole integer values"):
+        hb._make_field("watts", 17000.5, "number")
+
+
+def test_make_field_number_accepts_whole_float_losslessly():
+    # Homebox needs an integer JSON value, even when the input float is whole.
+    assert hb._make_field("watts", 17000.0, "number") == {
         "name": "watts", "type": "number", "numberValue": 17000,
     }
     assert hb._make_field("qty", 7, "number")["numberValue"] == 7

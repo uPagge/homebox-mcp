@@ -1,50 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.dgahagan/homebox-mcp",
-  "description": "Homebox home inventory: search, intake, warranties, attachments, locations, tags, QR labels",
+  "name": "io.github.uPagge/homebox-mcp",
+  "description": "Typed Homebox inventory MCP: complete reads, safe edits, authenticated HTTP",
   "repository": {
-    "url": "https://github.com/dgahagan/homebox-mcp",
+    "url": "https://github.com/uPagge/homebox-mcp",
     "source": "github"
   },
-  "version": "1.4.0",
-  "packages": [
-    {
-      "registryType": "pypi",
-      "identifier": "homebox-mcp",
-      "version": "1.4.0",
-      "transport": {
-        "type": "stdio"
-      },
-      "environmentVariables": [
-        {
-          "name": "HOMEBOX_URL",
-          "description": "Base URL of your Homebox instance (>= 0.26), e.g. https://homebox.example.com",
-          "isRequired": true,
-          "format": "string",
-          "isSecret": false
-        },
-        {
-          "name": "HOMEBOX_TOKEN",
-          "description": "Homebox API key (Profile -> API Keys, starts with hb_)",
-          "isRequired": true,
-          "format": "string",
-          "isSecret": true
-        },
-        {
-          "name": "HOMEBOX_ALIAS_FIELD",
-          "description": "Optional: name of one custom field treated as a stable item identifier for lookups",
-          "isRequired": false,
-          "format": "string",
-          "isSecret": false
-        },
-        {
-          "name": "HOMEBOX_LABEL_DIR",
-          "description": "Optional: directory where label/QR PNGs are saved (default: current directory)",
-          "isRequired": false,
-          "format": "string",
-          "isSecret": false
-        }
-      ]
-    }
-  ]
+  "version": "1.5.0",
+  "packages": []
 }

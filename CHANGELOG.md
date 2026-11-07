@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning: [SemVer](https://semver.org/).
 
+## [1.5.0] - 2026-11-07 (downstream fork)
+
+### Added
+- Complete typed `get_entity` and partial `update_entity` by stable UUID, with
+  explicit clearing, fractional quantity and custom-field removal.
+- Bounded `list_entities` pagination and per-operation API/time/response budgets.
+- Read/read-edit/legacy startup policies and authenticated HTTP with distinct
+  read/edit credentials, per-call enforcement, request limits and safe audit.
+- OAuth resource-server configuration for an external issuer (not an issuer).
+- HTTP contract/security tests and opt-in disposable real-backend round trips.
+
+### Fixed
+- Business failures now set MCP `isError` via `ToolError`.
+- Entity reads preserve false/zero/null, fields/IDs/types and attachment metadata.
+- PUT/upsert retains physical-location override, child synchronization and field IDs.
+- Number custom fields reject fractional truncation; API bodies are not echoed.
+
+### Changed
+- GitHub fork distribution, retaining upstream MIT/history; no PyPI publication.
+- Default runtime excludes create/delete/import/upload/file-output tools; legacy
+  exposure requires an explicit opt-in. Existing tool names remain available.
+- SDK floor is 2.3; fork CI does not inherit automatic merge/publication powers.
+
 ## [1.4.0] - 2026-10-25
 
 ### Changed

@@ -1,17 +1,18 @@
 # Contributing
 
-Thanks for your interest in improving `homebox-mcp`. It's a small, single-module
-MCP server, so contributing is lightweight.
+Thanks for your interest in improving `homebox-mcp`. The fork retains upstream tools and adds small typed-model,
+runtime and OAuth resource-verification modules. Keep changes focused and tested.
 
 ## Development setup
 
-You need [`uv`](https://docs.astral.sh/uv/). The server is one module
-(`homebox_mcp.py`) with [PEP 723](https://peps.python.org/pep-0723/) inline
-dependencies, so there's nothing to install up front — `uv` resolves everything
-on demand.
+You need [`uv`](https://docs.astral.sh/uv/). Use `uv sync --frozen` for the checked lock, then `uv run --frozen pytest`.
+Deployment requirements are exported with hashes from `uv.lock`; update them with
+`uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.lock`.
+The PEP 723 clone entrypoint remains available, but installing the package includes
+all sibling modules reliably.
 
 ```bash
-git clone https://github.com/dgahagan/homebox-mcp
+git clone https://github.com/uPagge/homebox-mcp
 cd homebox-mcp
 ```
 

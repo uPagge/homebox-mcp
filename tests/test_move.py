@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 # Locations (from /entities/tree): Office (o1), Car (c1).
 TREE = [
@@ -96,10 +98,11 @@ def test_move_into_ambiguous_item_refused(router, good_status):
         "lens": ("Lens", ["Office", "Lens"]),
     })
     import homebox_mcp as hb
-    result = hb.move_item("Lens", "Camera Bag")
-    assert "ambiguous — 2 items match" in result["error"]
-    assert "Office/Camera Bag (assetId 000-001)" in result["error"]
-    assert "Car/Camera Bag (assetId 000-002)" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.move_item("Lens", "Camera Bag")
+    assert "ambiguous — 2 items match" in str(exc.value)
+    assert "Office/Camera Bag (assetId 000-001)" in str(exc.value)
+    assert "Car/Camera Bag (assetId 000-002)" in str(exc.value)
     assert not patches["lens"].called
 
 
@@ -109,8 +112,9 @@ def test_move_into_own_descendant_refused(router, good_status):
         "pouch": ("Lens Pouch", ["Office", "Camera Bag", "Lens Pouch"]),
     })
     import homebox_mcp as hb
-    result = hb.move_item("Camera Bag", "Lens Pouch")
-    assert "into itself" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.move_item("Camera Bag", "Lens Pouch")
+    assert "into itself" in str(exc.value)
     assert not patches["bag"].called
 
 
@@ -215,18 +219,20 @@ def test_ambiguous_location_suggests_a_path(router, good_status):
     patches, _, _ = _inventory(router, {"lens": ("Lens", ["Office", "Lens"])},
                                tree=tree)
     import homebox_mcp as hb
-    result = hb.move_item("Lens", "Shelf")
-    assert "2 locations match: Garage/Shelf; Attic/Shelf" in result["error"]
-    assert "'Parent/Shelf'" in result["error"]
-    assert "assetId" not in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.move_item("Lens", "Shelf")
+    assert "2 locations match: Garage/Shelf; Attic/Shelf" in str(exc.value)
+    assert "'Parent/Shelf'" in str(exc.value)
+    assert "assetId" not in str(exc.value)
     assert not patches["lens"].called
 
 
 def test_move_unknown_destination(router, good_status):
     patches, _, _ = _inventory(router, {"lens": ("Lens", ["Office", "Lens"])})
     import homebox_mcp as hb
-    result = hb.move_item("Lens", "Basement")
-    assert "no location or item named 'Basement'" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.move_item("Lens", "Basement")
+    assert "no location or item named 'Basement'" in str(exc.value)
     assert not patches["lens"].called
 
 
@@ -241,7 +247,8 @@ def test_move_refuses_a_location(router, good_status):
     wall = router.patch("/entities/w1").mock(return_value=httpx.Response(200, json={}))
     _inventory(router, {"bag": ("Camera Bag", ["Office", "Camera Bag"])})
     import homebox_mcp as hb
-    result = hb.move_item("000-050", "Camera Bag")
-    assert "is a location" in result["error"]
-    assert "set_location" in result["error"]
+    with pytest.raises(ToolError) as exc:
+        hb.move_item("000-050", "Camera Bag")
+    assert "is a location" in str(exc.value)
+    assert "set_location" in str(exc.value)
     assert not wall.called

@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=2,<3", "httpx>=0.27", "pillow>=13", "pillow-heif>=0.16"]
+# dependencies = ["mcp>=2.3,<3", "httpx>=0.27", "pillow>=13", "pillow-heif>=0.16", "pyjwt[crypto]>=2.10,<3"]
 # ///
 """Homebox MCP server.
 
@@ -20,21 +20,32 @@ server exposes items (non-location entities), locations, and tags.
 """
 from __future__ import annotations
 
+import copy
 import datetime
 import functools
+import json
+import math
 import mimetypes
 import os
 import re
 import sys
+import time
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
+from uuid import UUID
 
+import anyio
 import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
-__version__ = "1.4.0"
+from homebox_mcp_models import EntityChanges, EntityOut, ItemDetail
+
+__version__ = "1.5.0"
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +87,7 @@ _client = httpx.Client(
     base_url=API,
     headers={"Authorization": HOMEBOX_TOKEN},
     timeout=30.0,
+    trust_env=False,
 )
 
 # version is surfaced to clients in the initialize handshake — it turns a
@@ -83,9 +95,71 @@ _client = httpx.Client(
 mcp = MCPServer("homebox", version=__version__)
 
 # Client hints: reads can run without prompting; deletes should prompt hard.
-_READONLY = ToolAnnotations(read_only_hint=True)
-_IDEMPOTENT = ToolAnnotations(idempotent_hint=True)
-_DESTRUCTIVE = ToolAnnotations(destructive_hint=True)
+_READONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
+_IDEMPOTENT = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False)
+_DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
+
+
+@dataclass
+class _OperationBudget:
+    deadline: float
+    requests: int = 0
+
+
+_budget: ContextVar[Optional[_OperationBudget]] = ContextVar("homebox_budget", default=None)
+MAX_BACKEND_REQUESTS = 2000
+OPERATION_TIMEOUT = 30.0
+MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+def _request(method: str, path: str, **kwargs):
+    budget = _budget.get()
+    timeout = 30.0
+    if budget is not None:
+        budget.requests += 1
+        remaining = budget.deadline - time.monotonic()
+        if remaining <= 0 or budget.requests > MAX_BACKEND_REQUESTS:
+            raise ToolError("operation budget exceeded; narrow the request or use list_entities")
+        timeout = min(timeout, remaining)
+    async def perform():
+        # Async network cancellation enforces an absolute wall-clock bound even
+        # for a peer trickling bytes faster than each HTTPX read timeout.
+        with anyio.fail_after(timeout):
+            async with httpx.AsyncClient(
+                base_url=_client.base_url, headers=_client.headers,
+                trust_env=False, timeout=timeout, follow_redirects=False,
+            ) as client:
+                async with client.stream(method, path, **kwargs) as response:
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(content) + len(chunk) > 4 * 1024 * 1024:
+                            raise ToolError("backend response exceeds 4 MiB; narrow the request")
+                        content.extend(chunk)
+                    headers = {k: v for k, v in response.headers.items()
+                               if k.lower() not in {"content-encoding", "content-length"}}
+                    return httpx.Response(response.status_code, headers=headers,
+                                          content=bytes(content), request=response.request)
+    try:
+        return anyio.run(perform)
+    except TimeoutError as e:
+        raise ToolError("operation deadline exceeded; a write may have completed; read back before retry") from e
+
+
+def _validate_tool_inputs(values):
+    if isinstance(values, str) and len(values) > 10000:
+        raise ToolError("input string exceeds 10000 characters")
+    if isinstance(values, (list, dict)) and len(values) > 200:
+        raise ToolError("input collection exceeds 200 entries")
+    if isinstance(values, dict):
+        for key, value in values.items():
+            _validate_tool_inputs(key)
+            _validate_tool_inputs(value)
+    elif isinstance(values, list):
+        for value in values:
+            _validate_tool_inputs(value)
+    elif isinstance(values, float) and not math.isfinite(values):
+        raise ToolError("numeric values must be finite")
 
 
 # ---------------------------------------------------------------------------
@@ -122,33 +196,37 @@ def _check_min_version() -> None:
 
 
 def _tool_errors(fn):
-    """Turn transport/API failures into legible tool errors (status + Homebox's
-    response body, which says *why*) instead of raw tracebacks, and run the
-    one-time version guard. Domain errors (not found, ambiguous, bad args) stay
-    as {"error": ...} returns from the tools themselves."""
+    """Normalize execution failures and bound API work; never return success errors."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        _check_min_version()
+        token = _budget.set(_OperationBudget(time.monotonic() + OPERATION_TIMEOUT))
         try:
-            return fn(*args, **kwargs)
+            _validate_tool_inputs(list(args))
+            _validate_tool_inputs(kwargs)
+            _check_min_version()
+            result = fn(*args, **kwargs)
+            if isinstance(result, dict) and result.get("error"):
+                raise ToolError(str(result["error"]))
+            payload = result.model_dump(mode="json", by_alias=True) if hasattr(
+                result, "model_dump") else result
+            if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
+                raise ToolError("result exceeds response budget; narrow the query or use list_entities")
+            return result
         except ToolError:
             raise
         except httpx.HTTPStatusError as e:
-            detail = ""
-            try:
-                detail = (e.response.text or "").strip()[:500]
-            except Exception:
-                pass
             raise ToolError(
-                f"Homebox API error {e.response.status_code} on "
-                f"{e.request.method} {e.request.url.path}"
-                + (f": {detail}" if detail else "")
+                f"Homebox API error {e.response.status_code} on {e.request.method}; "
+                "check permissions and the supplied field values"
             ) from e
         except httpx.RequestError as e:
             raise ToolError(
-                f"cannot reach Homebox at {HOMEBOX_URL}: "
-                f"{e.__class__.__name__}: {e}"
+                f"cannot reach Homebox: {e.__class__.__name__}; check service connectivity"
             ) from e
+        except (ValueError, TypeError) as e:
+            raise ToolError("invalid input or backend value; check the documented field types") from e
+        finally:
+            _budget.reset(token)
     return wrapper
 
 
@@ -156,19 +234,19 @@ def _tool_errors(fn):
 # Low-level helpers
 # ---------------------------------------------------------------------------
 def _get(path: str, **params) -> Any:
-    r = _client.get(path, params={k: v for k, v in params.items() if v is not None})
+    r = _request("GET", path, params={k: v for k, v in params.items() if v is not None})
     r.raise_for_status()
     return r.json() if r.content else None
 
 
 def _post(path: str, body: dict) -> Any:
-    r = _client.post(path, json=body)
+    r = _request("POST", path, json=body)
     r.raise_for_status()
     return r.json() if r.content else None
 
 
 def _put(path: str, body: dict) -> Any:
-    r = _client.put(path, json=body)
+    r = _request("PUT", path, json=body)
     r.raise_for_status()
     return r.json() if r.content else None
 
@@ -177,13 +255,13 @@ def _patch(path: str, body: dict) -> Any:
     """Partial update. PATCH /entities/{id} accepts parentId / quantity /
     tagIds / entityTypeId and — unlike PUT — leaves every omitted field alone,
     so no preserve-body dance is needed for those keys."""
-    r = _client.patch(path, json=body)
+    r = _request("PATCH", path, json=body)
     r.raise_for_status()
     return r.json() if r.content else None
 
 
 def _delete_path(path: str) -> None:
-    r = _client.delete(path)
+    r = _request("DELETE", path)
     r.raise_for_status()
 
 
@@ -286,7 +364,11 @@ def _make_field(name: str, value: Any, type: str = "text") -> dict:
         # Homebox's number custom field is integer-typed: a float JSON value
         # (e.g. 17000.0, which MCPServer produces from a float-typed arg) makes the
         # API 500 with "Unknown Error". Coerce to int.
-        entry["numberValue"] = int(value) if isinstance(value, float) else value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ToolError("number custom fields require whole integer values")
+        if isinstance(value, float) and (not math.isfinite(value) or not value.is_integer()):
+            raise ToolError("number custom fields require whole integer values")
+        entry["numberValue"] = int(value)
     elif type == "boolean":
         entry["booleanValue"] = value
     else:
@@ -300,6 +382,8 @@ def _upsert_field(body: dict, name: str, value: Any, type: str = "text") -> None
     new = _make_field(name, value, type)
     for i, f in enumerate(flds):
         if f.get("name") == name:
+            if f.get("id"):
+                new["id"] = f["id"]
             flds[i] = new
             return
     flds.append(new)
@@ -340,7 +424,8 @@ def _summarize(entity: dict, with_path: bool = False) -> dict:
     if HOMEBOX_ALIAS_FIELD:
         out[HOMEBOX_ALIAS_FIELD] = _field(entity, HOMEBOX_ALIAS_FIELD)
     parent = entity.get("parent") or {}
-    out["location"] = parent.get("name")
+    out["parent"] = parent.get("name")
+    out["location"] = (entity.get("location") or {}).get("name")
     if with_path and entity.get("id"):
         out["location_path"] = _location_path(entity["id"])
     return _compact(out)
@@ -351,6 +436,7 @@ def _search_all(
     parent_ids: Optional[str] = None,
     tags: Optional[list[str]] = None,
     page_size: int = 200,
+    max_results: Optional[int] = None,
 ) -> list[dict]:
     """Every matching entity, following pagination until the reported `total`
     is reached (a single page silently truncates inventories larger than the
@@ -372,6 +458,12 @@ def _search_all(
         else:
             batch, total = (data or []), None
         out.extend(batch)
+        if max_results is not None and len(out) >= max_results:
+            return out[:max_results]
+        if len(out) > 10000:
+            raise ToolError("scan exceeds 10000 entities; narrow the query or use list_entities")
+        if not batch and total is not None and len(out) < int(total):
+            raise ToolError("incomplete backend pagination; retry with a narrower query")
         if not batch or total is None or len(out) >= int(total):
             break
         page += 1
@@ -474,7 +566,7 @@ def _resolve_fuzzy(identifier: str) -> Optional[dict]:
 def search_items(
     query: Optional[str] = None,
     tags: Optional[list[str]] = None,
-    limit: int = 20,
+    limit: Annotated[int, Field(ge=1, le=200)] = 20,
 ) -> list[dict]:
     """Search inventory items by name/keyword and/or by tag names (AND of
     both when both given — e.g. everything tagged "power-tool").
@@ -492,7 +584,9 @@ def search_items(
         tag_ids = [known[t.lower()] for t in tags]
     if not query and not tag_ids:
         raise ToolError("pass query and/or tags")
-    results = [e for e in _search_all(q=query, tags=tag_ids)
+    if not 1 <= limit <= 200:
+        raise ToolError("limit must be between 1 and 200")
+    results = [e for e in _search_all(q=query, tags=tag_ids, max_results=limit)
                if not _is_location(e)]
     # list responses omit assetId/fields, so fetch full detail for the page
     return [_summarize(_get(f"/entities/{e['id']}")) for e in results[:limit]]
@@ -500,7 +594,7 @@ def search_items(
 
 @mcp.tool(annotations=_READONLY)
 @_tool_errors
-def get_item(identifier: str) -> dict:
+def get_item(identifier: str) -> ItemDetail:
     """Get full detail for one item by assetId (e.g. 000-028), alias custom
     field, or name (fuzzy fallback: first keyword match). Includes location
     path, serial, model, purchase, warranty, custom fields, tags, and
@@ -508,29 +602,113 @@ def get_item(identifier: str) -> dict:
     e = _resolve_fuzzy(identifier)
     if not e:
         return {"error": f"no item found matching '{identifier}'"}
-    return _compact({
-        "id": e.get("id"),
-        "assetId": e.get("assetId") or None,
-        "name": e.get("name"),
+    result = copy.deepcopy(e)
+    result.update({
+        "custom_fields": copy.deepcopy(e.get("fields") or []),
         "location_path": _location_path(e["id"]) or None,
-        "manufacturer": e.get("manufacturer") or None,
-        "modelNumber": e.get("modelNumber") or None,
-        "serialNumber": e.get("serialNumber") or None,
-        "quantity": e.get("quantity"),
-        "purchasePrice": e.get("purchasePrice") or None,
-        "purchaseDate": e.get("purchaseDate") or None,
-        "purchaseFrom": e.get("purchaseFrom") or None,
-        "warrantyExpires": e.get("warrantyExpires") or None,
-        "lifetimeWarranty": e.get("lifetimeWarranty") or None,
-        "notes": e.get("notes") or None,
-        "tags": [t.get("name") for t in e.get("tags") or []] or None,
-        "fields": {f.get("name"): _field_value(f) for f in e.get("fields") or []} or None,
-        "attachments": [
-            _compact({"type": a.get("type"), "title": a.get("title")
-                      or (a.get("document") or {}).get("title")})
-            for a in e.get("attachments") or []
-        ] or None,
+        "fields": {f.get("name"): _field_value(f) for f in e.get("fields") or []},
+        "tag_details": copy.deepcopy(e.get("tags") or []),
+        "tags": [t.get("name") for t in e.get("tags") or []],
+        "attachments": copy.deepcopy(e.get("attachments") or []),
     })
+    return result
+
+
+@mcp.tool(annotations=_READONLY)
+@_tool_errors
+def get_entity(entity_id: UUID) -> EntityOut:
+    """Read every entity DTO field by stable UUID, including physical location,
+    containment, custom-field IDs/types and complete attachment metadata.
+    Does not omit false, zero or null. Supports items and locations alike."""
+    return EntityOut.model_validate(_get(f"/entities/{entity_id}"))
+
+
+@mcp.tool(annotations=_IDEMPOTENT)
+@_tool_errors
+def update_entity(entity_id: UUID, changes: EntityChanges) -> EntityOut:
+    """Edit an existing item/location by UUID using typed partial changes.
+    Omitted fields stay unchanged. null clears dates or location/parent links;
+    empty strings clear text, [] clears fields/tags. remove_field_ids deletes
+    only named custom-field IDs. No creation/deletion of entities or attachments.
+    Full PUT cannot atomically guard against another client's concurrent edit."""
+    full = _get(f"/entities/{entity_id}")
+    data = changes.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    # exclude_unset is a top-level partial-update rule, not a reason to drop
+    # validated defaults (notably type='text') from nested replacement DTOs.
+    if "fields" in changes.model_fields_set:
+        data["fields"] = [field.model_dump(mode="json", by_alias=True, exclude_none=True)
+                          for field in changes.fields]
+    removals = set(data.pop("remove_field_ids", []))
+    current_ids = {f.get("id") for f in full.get("fields") or [] if f.get("id")}
+    if not removals <= current_ids:
+        raise ToolError("remove_field_ids contains a field not on this entity")
+    if "fields" in data:
+        for field in data["fields"]:
+            if field.get("id") and field["id"] not in current_ids:
+                raise ToolError("custom-field ID does not belong to this entity")
+            if field.get("type") == "time":
+                raise ToolError("time custom fields have no editable value in this backend DTO")
+            if field.get("id") is None:
+                field.pop("id", None)
+    if {"parentId", "locationId", "entityTypeId"} & data.keys():
+        parent_id = data.get("parentId", (full.get("parent") or {}).get("id"))
+        location_id = data.get("locationId", full.get("locationId"))
+        if location_id == str(entity_id):
+            raise ToolError("an entity cannot be its own location")
+        # Mirror backend normalization: a location without a containment parent
+        # becomes the parent, so it must receive the same ancestry validation.
+        if location_id and (not parent_id or location_id == parent_id):
+            parent_id = location_id
+        is_location = _is_location(full)
+        if data.get("entityTypeId"):
+            types = _get("/entity-types") or []
+            target_type = next((t for t in types if t.get("id") == data["entityTypeId"]), None)
+            if not target_type:
+                raise ToolError("entity type not found")
+            is_location = bool(target_type.get("isLocation"))
+        if parent_id:
+            if parent_id == str(entity_id):
+                raise ToolError("an entity cannot be its own parent")
+            path = _path_nodes(parent_id)
+            if path is None:
+                raise ToolError("cannot verify parent ancestry; no update performed")
+            if any(node.get("id") == str(entity_id) for node in path):
+                raise ToolError("cannot move an entity into its own descendant")
+            if is_location and not _is_location(_get(f"/entities/{parent_id}")):
+                raise ToolError("a location's parent must be a location")
+    body = _preserve_item_body(full)
+    for key in ("purchaseDate", "soldDate", "warrantyExpires"):
+        if key in data:
+            data[key] = _rfc3339(data[key]) if data[key] else ""
+    body.update(data)
+    if removals:
+        body["fields"] = [f for f in body.get("fields", []) if f.get("id") not in removals]
+    patch_keys = {"quantity", "archived", "tagIds", "parentId", "locationId", "entityTypeId"}
+    if data and not removals and data.keys() <= patch_keys and all(
+        data.get(key) is not None for key in ("parentId", "locationId", "entityTypeId")
+        if key in data
+    ):
+        _patch(f"/entities/{entity_id}", {"id": str(entity_id), **data})
+    elif data or removals:
+        _put(f"/entities/{entity_id}", body)
+    return EntityOut.model_validate(_get(f"/entities/{entity_id}"))
+
+
+@mcp.tool(annotations=_READONLY)
+@_tool_errors
+def list_entities(
+    page: Annotated[int, Field(ge=1)] = 1,
+    page_size: Annotated[int, Field(ge=1, le=200)] = 50,
+    query: Optional[str] = None,
+) -> dict[str, Any]:
+    """One bounded backend page of entity summaries; no hidden full scan.
+    For a complete entity use get_entity with a returned UUID. The backend's
+    entity list excludes locations; list_locations supplies their tree."""
+    response = _get("/entities", page=page, pageSize=page_size, q=query)
+    items = response.get("items", [])
+    total = response.get("total", len(items))
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "next_page": page + 1 if page * page_size < total else None}
 
 
 @mcp.tool(annotations=_READONLY)
@@ -556,7 +734,7 @@ def list_locations() -> str:
 def location_contents(
     location: str,
     recursive: bool = False,
-    max_items: int = 500,
+    max_items: Annotated[int, Field(ge=1, le=1000)] = 500,
 ) -> dict:
     """List what is in a location (e.g. a tote or shelf), by location name.
 
@@ -1148,7 +1326,7 @@ def _preserve_item_body(full: dict) -> dict:
         "manufacturer", "modelNumber", "serialNumber", "notes",
         "purchasePrice", "purchaseFrom", "purchaseDate",
         "soldDate", "soldTo", "soldPrice", "soldNotes",
-        "warrantyExpires", "warrantyDetails",
+        "warrantyExpires", "warrantyDetails", "locationId", "syncChildEntityLocations",
     ):
         if full.get(k) is not None:
             body[k] = full[k]
@@ -1168,7 +1346,8 @@ def _preserve_item_body(full: dict) -> dict:
         # Preserve each field's value by its declared type — coercing everything
         # to textValue (the old behavior) silently wiped numeric/boolean fields.
         body["fields"] = [
-            _make_field(f.get("name"), _field_value(f), f.get("type", "text"))
+            dict(_make_field(f.get("name"), _field_value(f), f.get("type", "text")),
+                 **({"id": f["id"]} if f.get("id") else {}))
             for f in flds
         ]
     return body
@@ -1377,7 +1556,7 @@ def set_item(
     new_name: Optional[str] = None,
     description: Optional[str] = None,
     notes: Optional[str] = None,
-    quantity: Optional[int] = None,
+    quantity: Annotated[Optional[float], Field(ge=0, allow_inf_nan=False)] = None,
     purchase_price: Optional[float] = None,
     purchase_date: Optional[str] = None,
     purchase_from: Optional[str] = None,
@@ -2019,7 +2198,9 @@ def export_csv(save_to: Optional[str] = None) -> dict:
 
 @mcp.tool(annotations=_READONLY)
 @_tool_errors
-def list_custom_fields(field: Optional[str] = None, limit: int = 200) -> Any:
+def list_custom_fields(
+    field: Optional[str] = None, limit: Annotated[int, Field(ge=1, le=200)] = 200,
+) -> Any:
     """Discover the custom-field schema actually in use: with no arg, all
     custom-field NAMES across the inventory; with `field`, the distinct
     VALUES of that field ({"total", "values"}, capped at `limit`). Useful
@@ -2034,8 +2215,9 @@ def list_custom_fields(field: Optional[str] = None, limit: int = 200) -> Any:
 
 
 def main() -> None:
-    """Entry point for the `homebox-mcp` console script and direct runs."""
-    mcp.run()
+    """Entry point for stdio or authenticated HTTP with explicit tool policy."""
+    from homebox_mcp_runtime import run
+    run(sys.modules[__name__])
 
 
 if __name__ == "__main__":

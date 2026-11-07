@@ -1,10 +1,10 @@
 # homebox-mcp
 
-<!-- mcp-name: io.github.dgahagan/homebox-mcp -->
-
-[![PyPI version](https://img.shields.io/pypi/v/homebox-mcp)](https://pypi.org/project/homebox-mcp/)
+A downstream fork of [dgahagan/homebox-mcp](https://github.com/dgahagan/homebox-mcp),
+retaining its MIT license and upstream history. **Install this fork from GitHub;
+the PyPI package `homebox-mcp` belongs to upstream and does not contain these changes.**
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/dgahagan/homebox-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/dgahagan/homebox-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/uPagge/homebox-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/uPagge/homebox-mcp/actions/workflows/ci.yml)
 
 An [MCP](https://modelcontextprotocol.io) server over the
 [Homebox](https://homebox.software) REST API, so an MCP client like Claude can
@@ -14,6 +14,24 @@ here's a photo of the receipt and the model number".* It answers questions,
 performs intake (create an item, attach the manual/receipt, tag and file it),
 manages attachments, and prints QR labels for totes and shelves — no
 hand-rolled `curl`.
+
+## Fork improvements and safe defaults
+
+- Domain failures are MCP execution errors, not successful `{"error": ...}` results.
+- `get_entity` provides the complete typed DTO; `get_item` retains legacy fields
+  and adds `custom_fields` with IDs/types. False, zero and null are preserved.
+- `update_entity` provides typed partial changes, fractional quantity, explicit
+  clear operations, physical-location overrides and custom-field removal.
+- PUT/upsert editors preserve field IDs, physical location and child sync flags.
+  Concurrent UI changes can still be overwritten: PUT is not conditional.
+- Default **read-edit** mode excludes standalone creation/deletion, URL/file
+  upload, file output and external lookup. `--tool-mode read` is read-only;
+  `--tool-mode legacy` explicitly opts into all upstream risks. Tag editors
+  can implicitly create tags.
+- HTTP requires independent MCP credentials with per-call read/edit enforcement,
+  body/rate/concurrency/deadline limits and redacted audit.
+- [Security/runtime configuration](docs/fork-runtime.md),
+  [disposable integration testing](docs/integration-tests.md).
 
 ## Quickstart
 
@@ -26,12 +44,13 @@ and an API key from **Profile → API Keys** in the Homebox web UI.
 claude mcp add homebox --scope user \
   -e HOMEBOX_URL=https://homebox.example.com \
   -e HOMEBOX_TOKEN=hb_xxxxxxxxxxxxxxxxxxxxxxxx \
-  -- uvx homebox-mcp
+  -- uvx --from 'git+https://github.com/uPagge/homebox-mcp@v1.5.0' homebox-mcp
 claude mcp get homebox      # should show: Status ✔ Connected
 ```
 
-`--scope user` makes it available from any project. `uvx` fetches and runs the
-published package in an ephemeral environment — nothing to install first.
+`--scope user` makes it available from any project. The Git tag pins this fork
+rather than installing the upstream PyPI package. Keep real credentials out of
+shell history; use your client's secure configuration or a protected env file.
 
 ### Claude Desktop / generic MCP clients
 
@@ -42,7 +61,7 @@ Add to your client's MCP config (e.g. `claude_desktop_config.json`):
   "mcpServers": {
     "homebox": {
       "command": "uvx",
-      "args": ["homebox-mcp"],
+      "args": ["--from", "git+https://github.com/uPagge/homebox-mcp@v1.5.0", "homebox-mcp"],
       "env": {
         "HOMEBOX_URL": "https://homebox.example.com",
         "HOMEBOX_TOKEN": "hb_xxxxxxxxxxxxxxxxxxxxxxxx"
@@ -60,7 +79,7 @@ dependencies, so it also runs standalone with `uv run --script` — `uv` resolve
 Instead of env vars, drop credentials in a `.env` file next to the module:
 
 ```bash
-git clone https://github.com/dgahagan/homebox-mcp
+git clone https://github.com/uPagge/homebox-mcp
 cd homebox-mcp
 cp .env.example .env        # .env is gitignored
 chmod 600 .env
@@ -91,9 +110,8 @@ gitignored `.env`.
 - **An API key** — Homebox **Profile → API Keys** (the token starts with `hb_`).
 - **[`uv`](https://docs.astral.sh/uv/)**, or any **Python ≥ 3.11** environment
   where you install `homebox-mcp` yourself.
-- **MCP SDK 2.x** (`mcp>=2,<3`), pulled in automatically. `uvx`/`pipx` build an
-  isolated environment, so this needs no action. If you are installing into an
-  environment already pinned to `mcp<2`, stay on `homebox-mcp==1.0.1`.
+- **MCP SDK 2.3+ within 2.x**, pulled in automatically. This fork uses current
+  HTTP/middleware/auth APIs and does not claim compatibility with SDK 1.x.
 
 ## Configuration
 
@@ -109,7 +127,11 @@ clone workflow):
 
 ## Tools
 
-~39 tools. Reads accept a **fuzzy** identifier (assetId, alias field, exact
+The source retains upstream tools plus typed entity tools. Normal startup
+exposes the explicit inventory allowlist; **legacy** operations require
+`--tool-mode legacy`. Tool names are retained for compatibility.
+
+Reads accept a **fuzzy** identifier (assetId, alias field, exact
 name, then first keyword match). Write tools require an **exact** identifier
 (assetId, alias field, or exact name) — a typo or an ambiguous match is refused
 rather than mutating the wrong item. An assetId must be in the full
@@ -122,13 +144,15 @@ rather than mutating the wrong item. An assetId must be in the full
 | Tool | Purpose |
 |------|---------|
 | `search_items(query?, tags?, limit=20)` | Search items by keyword and/or tag names (AND of both); returns each with assetId, location, and the alias field. |
-| `get_item(identifier)` | Full detail for one item: location path, identity, purchase, warranty, custom fields, tags, attachments. |
+| `get_item(identifier)` | Full detail plus legacy field map and typed `custom_fields`; `location_path` is containment, not physical location. |
+| `get_entity(entity_id)` | Complete typed DTO by UUID: physical location, parent, custom-field IDs/types and attachment metadata. |
+| `list_entities(page=1, page_size=50, query?)` | One bounded page of summaries with total/next page, no hidden full scan. |
 | `list_locations()` | The full location tree as an indented outline. |
 | `location_contents(location, recursive=False)` | Items directly in a location plus its sub-location names; `recursive=True` walks the whole subtree and returns every nested item with its full location path. |
 | `list_tags(detail=False)` | All tag (label) names; `detail=True` returns full objects (description, color, icon, parent tag). |
 | `warranties_expiring(before?, after?, lifetime=False)` | Items whose warranty expires in `after…before` (`after` defaults to today, excluding already-expired); `lifetime=True` lists lifetime-warranty items. |
 
-### Create & intake
+### Create & intake — legacy only
 
 | Tool | Purpose |
 |------|---------|
@@ -146,6 +170,7 @@ touch (a full-body PUT that echoes the rest of the item back — see
 
 | Tool | Purpose |
 |------|---------|
+| `update_entity(entity_id, changes)` | Typed partial DTO changes; null date/location clears, list replacement and `remove_field_ids`. |
 | `set_item(identifier, new_name?, description?, notes?, quantity?, purchase_price?, purchase_date?, purchase_from?, insured?, archived?, fields?)` | General item editor: rename, notes, quantity, purchase info, insured/archived flags, custom fields. Quantity-only edits use a partial PATCH. |
 | `move_item(identifier, location)` | Move an item into a location or into another item (e.g. a lens into `Camera Bag`). The destination is a location name or path, as before; only if no location matches is it looked up as an item by exact name or path (e.g. `Office/Camera Bag`), or give the item's assetId. A name matching more than one is refused, and so is a location as the item to move — use `set_location` (partial PATCH — nothing else changes). |
 | `set_warranty(identifier, expires?, lifetime?, details?)` | Set warranty end date, lifetime flag, and terms summary. |
@@ -186,7 +211,7 @@ touch (a full-body PUT that echoes the rest of the item back — see
 > stores a browser-renderable image, and sanitize `/` in titles (Homebox treats
 > a title as a path and would otherwise truncate it).
 
-### Deletes (confirm-gated)
+### Deletes — legacy only, confirm-gated
 
 Every delete requires `confirm` to equal the target's exact name and carries
 the MCP `destructiveHint` annotation, so clients prompt before running them.
@@ -198,7 +223,7 @@ the MCP `destructiveHint` annotation, so clients prompt before running them.
 | `delete_tag(name, confirm)` | Delete a tag itself (removed from every tagged item; the items survive). |
 | `delete_attachment(identifier, attachment_id, confirm)` | Delete one attachment (`confirm` = its exact title). |
 
-### Labels & finalize
+### Labels & finalize — file output/finalization require legacy mode
 
 | Tool | Purpose |
 |------|---------|
@@ -237,10 +262,9 @@ exposes. These are hard-won behaviors of the 0.26 entities API:
 - **Attachment titles are basenamed on `/`.** Homebox treats a title as
   path-like, so "front 3/4 view" silently stores as "4 view". The server
   sanitizes `/`→`-` in attach titles.
-- **Number custom fields are integer-typed.** A float `numberValue` (e.g.
-  `17000.0`, which the MCP SDK produces from a `float`-typed arg) makes the API
-  **500 "Unknown Error"**. The server coerces number values to `int`; pass whole
-  numbers.
+- **Number custom fields are integer-typed.** Whole floats are converted
+  losslessly for legacy setters; fractional values are rejected, not silently
+  truncated. Entity quantity supports fractions.
 - **Custom-field values are type-keyed** (`textValue` / `numberValue` /
   `booleanValue`). The server rebuilds each field by its declared type —
   coercing everything to `textValue` (an earlier bug) silently wiped
@@ -298,7 +322,7 @@ install.
 ## Development
 
 ```bash
-git clone https://github.com/dgahagan/homebox-mcp
+git clone https://github.com/uPagge/homebox-mcp
 cd homebox-mcp
 
 # Run the test suite (httpx mocked with respx — no live instance needed)
@@ -308,8 +332,8 @@ uv run --with pytest --with respx --with . pytest
 uv run --with ruff ruff check .
 ```
 
-The server is a single module (`homebox_mcp.py`) with PEP 723 inline
-dependencies. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and PR
+The fork retains the upstream module and separates typed models, runtime
+policy/authentication and OAuth resource-server support into small modules. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and PR
 expectations, and [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License

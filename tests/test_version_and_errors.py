@@ -30,13 +30,20 @@ def test_unreachable_status_fails_open(router, mock_status):
     assert hb.list_tags() == []
 
 
-def test_api_500_surfaces_status_and_body(router, good_status):
+def test_api_500_surfaces_status_without_private_body(router, good_status, caplog, capsys):
+    secret = "PRIVATE_API_BODY_SECRET_MARKER"
     router.get("/tags").mock(
-        return_value=httpx.Response(500, json={"error": "boom detail"})
+        return_value=httpx.Response(500, json={"error": "boom detail", "secret": secret})
     )
     import homebox_mcp as hb
     with pytest.raises(ToolError) as exc:
         hb.list_tags()
     msg = str(exc.value)
     assert "500" in msg
-    assert "boom detail" in msg
+    assert "Homebox API error" in msg
+    assert "boom detail" not in msg
+    assert secret not in msg
+    captured = capsys.readouterr()
+    emitted = caplog.text + captured.out + captured.err
+    assert "boom detail" not in emitted
+    assert secret not in emitted
