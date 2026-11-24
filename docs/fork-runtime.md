@@ -50,6 +50,9 @@ it. The template contains placeholders only.
 homebox-mcp --transport streamable-http --tool-mode read-edit
 ```
 
+The stateless MCP endpoint serves requests over POST. An authenticated standalone
+GET to `/mcp` returns 405, allowing clients to proceed without an idle SSE stream.
+
 Default bind is loopback, port 8000. HTTP fails closed without a valid MCP key.
 The backend token cannot be reused as an MCP credential. Every request is
 authenticated, and the read capability is checked at actual tool invocation,

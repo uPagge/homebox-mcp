@@ -147,6 +147,17 @@ def test_auth_every_request_and_scoped_invocation(hb):
         }).status_code == 401
 
 
+def test_stateless_mcp_does_not_open_a_notification_stream(hb):
+    app = configured(hb, tool_timeout_seconds=0.1, request_timeout_seconds=0.5)
+    with TestClient(app, base_url="http://localhost", raise_server_exceptions=False) as client:
+        headers = HEADERS | {"Accept": "text/event-stream", "Authorization": f"Bearer {READ_KEY}"}
+        assert client.get("/mcp", headers=headers | {"Authorization": ""}).status_code == 401
+        response = client.get("/mcp", headers=headers)
+        assert response.status_code == 405
+        assert "POST" in response.headers["allow"]
+        assert rpc(client, headers={"Authorization": f"Bearer {READ_KEY}"}).status_code == 200
+
+
 def test_read_mode_rejects_edit_even_with_edit_credential(hb):
     with TestClient(configured(hb, "read"), base_url="http://localhost") as client:
         result = rpc(client, "tools/call", {"name": "update_entity"}).json()

@@ -299,6 +299,12 @@ class _PrivateHTTP:
                 await JSONResponse({"error": "MCP bearer authentication required"}, 401,
                                    headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
             return
+        # This stateless server returns JSON on POST. A standalone SSE listener
+        # cannot deliver session notifications and would occupy a request slot.
+        if scope.get("method") == "GET" and scope.get("path") == "/mcp":
+            await JSONResponse({"error": "Standalone event streams are not supported"}, 405,
+                               headers={"Allow": "POST"})(scope, receive, send)
+            return
         if self.active >= self.config.max_concurrent:
             await JSONResponse({"error": "HTTP concurrency limit exceeded"}, 503,
                                headers={"Retry-After": "1"})(scope, receive, send)
