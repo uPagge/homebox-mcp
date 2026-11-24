@@ -18,7 +18,22 @@ Normal entrypoints (`homebox-mcp`, `python homebox_mcp.py`, compatibility
 | `--tool-mode read-edit` (default) | 13 reads + 12 editors |
 | `--tool-mode legacy` | All retained upstream tools, including create/delete, arbitrary URL/file uploads and filesystem output |
 
-The new tools are `get_entity`, `update_entity` and `list_entities`. Existing tool
+Setting `HOMEBOX_ATTACHMENT_SEARCH_URL` enables two additional read tools in each
+mode. Configure a trusted endpoint ending in `/attachment-search`, reachable from
+the MCP process. MCP sends its Homebox service credential there. Use HTTPS across
+untrusted networks. Bearer and OAuth clients share the collection accessible to
+that configured Homebox identity.
+
+`search_attachments` accepts up to 500 characters. `find_similar_attachments`
+accepts either an existing Homebox photo (entity and attachment UUIDs, up to
+4 MiB) or a client-supplied image (base64 and MIME type, up to 700 KiB decoded).
+Use a single-frame JPEG, PNG, WebP, GIF, TIFF or BMP.
+Both return up to 20 ranked hits with the entity and attachment IDs, match type,
+an available text snippet and the page number for PDFs. A `partial` result
+means some matches may be missing, including when visual inference is busy.
+An empty partial result is inconclusive. Tool errors report a failed request.
+
+The core tools include `get_entity`, `update_entity` and `list_entities`. Existing tool
 names are retained. A Python import registers source tools but does not apply
 runtime policy; embedded servers must call `await configure_tools(module, mode)`
 BEFORE creating their app. Do not expose `module.mcp.run()` directly and assume
@@ -170,7 +185,10 @@ Current defaults:
   process (including invalid-auth attempts), tool deadline 60 s and request
   deadline 65 s. One process-global bucket bounds memory; it is not a multiworker
   distributed rate limiter and can be exhausted by a caller reaching the port.
-- Core operation wall-clock budget 30 s, at most 2000 backend calls, at most
+- Core operation wall-clock budget 30 s. Attachment searches have 55 s to allow
+  visual inference and the subsequent visibility checks for text matches. Homebox
+  API calls within a search still have a 30 s individual limit.
+- At most 2000 backend calls per operation, at most
   4 MiB per backend response and 1 MiB tool output. Async HTTPX cancellation
   enforces the wall-clock budget even on trickling responses. Backend requests
   are made without inherited proxy settings or automatic redirects. No automatic

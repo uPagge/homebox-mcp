@@ -87,6 +87,35 @@ def test_invalid_or_missing_tool_policy_fails_without_partial_removal(hb):
     assert "delete_item" in {tool.name for tool in anyio.run(hb.mcp.list_tools)}
 
 
+@pytest.mark.parametrize("mode", ["read", "read-edit", "legacy"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_optional_attachment_search_read_discovery_and_calls(hb, enabled, mode):
+    names = {"search_attachments", "find_similar_attachments"}
+
+    async def attachment_search() -> dict:
+        hb.calls.append("searched")
+        return {"hits": [], "partial": False}
+
+    for name in names:
+        hb.mcp.add_tool(attachment_search, name=name)
+    hb.HOMEBOX_ATTACHMENT_SEARCH_URL = "http://search.test/attachment-search" if enabled else ""
+    with TestClient(configured(hb, mode), base_url="http://localhost") as client:
+        read_key = {"Authorization": f"Bearer {READ_KEY}"}
+        for headers in (read_key, {}):
+            tools = rpc(client, headers=headers).json()["result"]["tools"]
+            discovered = {t["name"] for t in tools}
+            assert "search_items" in discovered
+            assert discovered & names == (names if enabled else set())
+            for tool in tools:
+                if tool["name"] in names:
+                    assert tool["annotations"]["readOnlyHint"] is True
+                    assert tool["annotations"]["destructiveHint"] is False
+            for name in names:
+                result = rpc(client, "tools/call", {"name": name}, headers).json()["result"]
+                assert result["isError"] is (not enabled)
+        assert len(hb.calls) == (4 if enabled else 0)
+
+
 @pytest.mark.parametrize("key", [None, "", "short", "x" * 31, " " * 40, "é" * 40])
 def test_http_rejects_weak_or_missing_key(hb, key):
     with pytest.raises(ValueError, match="credentials"):

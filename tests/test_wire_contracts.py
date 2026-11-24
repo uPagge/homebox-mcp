@@ -67,6 +67,21 @@ def test_unknown_partial_input_is_rejected_without_mutation(client):
     put.assert_not_called()
 
 
+def test_attachment_search_returns_pdf_page_on_the_wire(client, router, monkeypatch):
+    service = "http://attachment-search.test/attachment-search"
+    monkeypatch.setattr(hb, "HOMEBOX_ATTACHMENT_SEARCH_URL", service)
+    hit = {
+        "entityId": ID, "entityName": "Drawer", "attachmentId": ID,
+        "attachmentTitle": "Receipt", "isLocation": False, "kind": "pdf",
+        "page": 2, "match": "text", "snippet": "Invoice 4321",
+    }
+    expected = {"hits": [hit], "partial": True}
+    router.get(service + "/query", params={"q": "4321"}).respond(200, json=expected)
+    result = call(client, "search_attachments", {"query": "4321"}).json()["result"]
+    assert not result["isError"]
+    assert result["structuredContent"] == expected
+
+
 def test_backend_request_budget_fails_instead_of_partial_success(monkeypatch):
     monkeypatch.setattr(hb, "_check_min_version", lambda: None)
     monkeypatch.setattr(hb, "MAX_BACKEND_REQUESTS", 0)

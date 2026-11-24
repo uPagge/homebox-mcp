@@ -6,6 +6,10 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Optional read-only tools to search photos and PDF pages by visual content or
+  text, and to find similar attachments from a reference photo.
+
 ### Fixed
 - Decline the optional standalone SSE notification stream on the stateless
   HTTP endpoint so idle listeners do not occupy inventory request slots.

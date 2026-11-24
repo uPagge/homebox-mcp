@@ -200,8 +200,16 @@ touch (a full-body PUT that echoes the rest of the item back — see
 
 ### Attachments
 
+To search inside attachments, run the [Homebox attachment search service](https://github.com/uPagge/homebox/tree/niimbot-v0.27.1/ops/attachment-search)
+and use a checkout of this fork containing the search tools (added after v1.5.0).
+Set `HOMEBOX_ATTACHMENT_SEARCH_URL` to the service's trusted HTTP(S) URL ending
+in `/attachment-search`, then restart MCP. It uses the existing search index and
+the collection visible to `HOMEBOX_TOKEN`. Both tools are available with read access.
+
 | Tool | Purpose |
 |------|---------|
+| `search_attachments(query)` | Find objects depicted in photos or PDF pages, or words in receipts, scans and other documents. For example, search for `scissors` even if the item name is just “Drawer”. |
+| `find_similar_attachments(...)` | Find visually similar photos or PDF pages. Supply `entity_id` and `attachment_id` from a hit, or send `image_base64` and `mime_type` from a client with access to the photo. |
 | `attach_document(identifier, source, title, doc_type="manual", primary=False)` | Attach a file (local **path or http(s) URL**) to an item, or to a location by name as a fallback. `doc_type` e.g. manual/receipt/warranty/photo; `primary=True` makes a photo the entity's primary image (e.g. a location's "this is the spot" wayfinding shot). |
 | `list_attachments(identifier)` | List an item's or location's attachments **with their ids** (the handle the other attachment tools need). |
 | `get_attachment(identifier, attachment_id, save_to)` | Download one attachment to a local path so its content (e.g. a manual) can be read. |

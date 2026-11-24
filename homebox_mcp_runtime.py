@@ -33,6 +33,7 @@ READ_TOOLS = frozenset({
     "list_tags", "warranties_expiring", "inventory_stats", "list_custom_fields",
     "list_attachments", "field_index", "list_maintenance", "get_entity", "list_entities",
 })
+ATTACHMENT_SEARCH_TOOLS = frozenset({"search_attachments", "find_similar_attachments"})
 EDIT_TOOLS = frozenset({
     "set_item", "move_item", "set_warranty", "set_identity", "set_fields",
     "set_tags", "set_tag", "set_location", "mark_sold", "set_maintenance",
@@ -71,8 +72,9 @@ def _execution_error(message: str) -> dict[str, Any]:
 
 
 class _ToolPolicy:
-    def __init__(self, allowed: frozenset[str], deadline: float = 60.0):
+    def __init__(self, allowed: frozenset[str], read_tools: frozenset[str], deadline: float = 60.0):
         self.allowed = allowed
+        self.read_tools = read_tools
         self.deadline = deadline
 
     async def __call__(self, ctx: Any, call_next: Any) -> Any:
@@ -82,11 +84,11 @@ class _ToolPolicy:
                 if isinstance(result, dict):
                     result = {**result, "tools": [
                         tool for tool in result.get("tools", [])
-                        if tool["name"] in READ_TOOLS
+                        if tool["name"] in self.read_tools
                     ]}
                 else:
                     result = result.model_copy(update={
-                        "tools": [tool for tool in result.tools if tool.name in READ_TOOLS]
+                        "tools": [tool for tool in result.tools if tool.name in self.read_tools]
                     })
             return result
         if ctx.method != "tools/call":
@@ -98,7 +100,7 @@ class _ToolPolicy:
         outcome = "error"
         try:
             if safe_name == "unknown" or (
-                _capability.get() == "read" and name not in READ_TOOLS
+                _capability.get() == "read" and name not in self.read_tools
             ):
                 outcome = "denied"
                 return _execution_error("Tool is not permitted for this credential or mode")
@@ -131,20 +133,26 @@ async def configure_tools(hb: Any, mode: str = "read-edit") -> None:
         raise ValueError("tool mode must be read, read-edit or legacy")
     tools = await hb.mcp.list_tools()
     found = frozenset(tool.name for tool in tools)
-    allowed = found if mode == "legacy" else READ_TOOLS | (
-        EDIT_TOOLS if mode == "read-edit" else frozenset()
-    )
+    read_tools = READ_TOOLS
+    search_enabled = bool(getattr(hb, "HOMEBOX_ATTACHMENT_SEARCH_URL", ""))
+    if search_enabled:
+        read_tools |= ATTACHMENT_SEARCH_TOOLS
+    allowed = read_tools
+    if mode == "legacy":
+        allowed = found if search_enabled else found - ATTACHMENT_SEARCH_TOOLS
+    elif mode == "read-edit":
+        allowed |= EDIT_TOOLS
     if not allowed <= found:
         raise RuntimeError("Required inventory tools are missing; check fork/SDK compatibility")
     for tool in tools:
         if tool.name not in allowed:
             hb.mcp.remove_tool(tool.name)
-        elif tool.name in READ_TOOLS | EDIT_TOOLS:
+        elif tool.name in read_tools | EDIT_TOOLS:
             # SDK list_tools returns wire-model copies. This localized SDK access
             # updates registered annotations without rebuilding schemas/functions.
             registered = hb.mcp._tool_manager.get_tool(tool.name)
             registered.annotations = ToolAnnotations(
-                read_only_hint=tool.name in READ_TOOLS,
+                read_only_hint=tool.name in read_tools,
                 destructive_hint=tool.name in EDIT_TOOLS,
                 idempotent_hint=True,
                 open_world_hint=False,
@@ -153,7 +161,7 @@ async def configure_tools(hb: Any, mode: str = "read-edit") -> None:
     previous = [mw for mw in hb.mcp.middleware if isinstance(mw, _ToolPolicy)]
     for middleware in previous:
         hb.mcp.middleware.remove(middleware)
-    hb.mcp.middleware.append(_ToolPolicy(allowed))
+    hb.mcp.middleware.append(_ToolPolicy(allowed, read_tools))
 
 
 @dataclass(frozen=True)
